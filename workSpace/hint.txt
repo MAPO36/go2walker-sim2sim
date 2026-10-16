@@ -1,0 +1,5 @@
+默认保存训练结果：
+logs/<experiment_name>/<date_time>_<run_name>/model_<iteration>.pt
+
+
+Play 会导出 Actor 网络，保存于 logs/{experiment_name}/exported/policies 中
