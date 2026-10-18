@@ -1,0 +1,110 @@
+零速度指令残余漂移抑制 — 工作记录
+工程根目录: /home/ubuntu/B4_2025/unitree_rl_gym
+开始日期: 2026-10-18
+
+================================================================================
+基线（改动前）
+================================================================================
+  Isaac Gym 0 指令 20 秒漂移: 0.21 m (约 1.0 cm/s)
+  MuJoCo   0 指令 20 秒漂移: 0.52 m (约 2.6 cm/s)
+  rew_tracking_lin_vel: 0.8337
+
+================================================================================
+第 0 步：备份（2026-10-18 11:07）
+================================================================================
+  策略:
+    logs/rough_go2/exported/policies/policy_before_zero_cmd.pt
+  源码:
+    agentWorkSpace/backups/go2_env.py.before_zero_cmd
+    agentWorkSpace/backups/go2_config.py.before_zero_cmd
+
+================================================================================
+第 1 步：新增奖励函数
+================================================================================
+  文件: legged_gym/envs/go2/go2_env.py
+  函数: _reward_zero_cmd_lin_vel()
+  门控: norm(commands[:, :2]) < 0.2  (与 _resample_commands 的清零阈值一致)
+  惩罚: norm(base_lin_vel[:, :2])    (一次范数，非平方)
+
+================================================================================
+第 2 步：新增权重（第一轮，方案 A）
+================================================================================
+  文件: legged_gym/envs/go2/go2_config.py
+  rewards.scales.zero_cmd_lin_vel = -2.0
+
+================================================================================
+第 3 步：冒烟测试（2 轮）
+================================================================================
+  命令: python legged_gym/scripts/train.py --task=go2 --headless --max_iterations=2
+  结果: 通过
+    - 无 AttributeError（函数名/配置 key 对上）
+    - Episode/rew_zero_cmd_lin_vel 出现: -0.0005 -> -0.0017（负数、非零）
+    - 无 NaN
+    - 冒烟测试日志目录已删除
+
+================================================================================
+第 4 步：第一轮完整训练（用户执行，2026-10-18 11:11~11:34）
+================================================================================
+  运行目录: logs/go2_2/Oct18_11-11-05_go2_2  (3000 轮)
+  指标:
+    rew_tracking_lin_vel: 0.8407   (>= 0.7，且高于基线 0.8337)
+    rew_zero_cmd_lin_vel: -0.0061  (为非零负数，奖励项在起作用)
+    Train/mean_episode_length: 1002.0
+    Train/mean_reward: 30.53
+  用户反馈:
+    原地不动时依旧出现踏步（小碎步）。
+    说明平移漂移有改善，但站姿保持不"死"。
+
+================================================================================
+第 4.1 步：第二轮（方案 C，2026-10-18 11:47）
+================================================================================
+  只改一个变量，便于 A/B：新增 zero_cmd_dof_vel，未加 action 惩罚。
+
+  文件: legged_gym/envs/go2/go2_env.py
+  函数: _reward_zero_cmd_dof_vel()
+  门控: norm(commands[:, :2]) < 0.2 AND |commands[:, 2]| < 0.1
+        （原地转向本来就要迈步，所以偏航也要接近 0 才惩罚）
+  惩罚: sum(dof_vel^2)
+
+  文件: legged_gym/envs/go2/go2_config.py
+  rewards.scales.zero_cmd_dof_vel = -5e-3
+
+================================================================================
+第 3 步（第二轮冒烟测试）
+================================================================================
+  命令: python legged_gym/scripts/train.py --task=go2 --headless --max_iterations=2
+        python legged_gym/scripts/train.py --task=go2 --headless --max_iterations=10
+  结果: 通过
+    - 2 轮时 Episode/rew_zero_cmd_dof_vel 显示 0.0000（样本太少 + 日志按重置
+      环境取均值，取整为 0）；10 轮后出现 -0.0011 / -0.0010 / -0.0002，确认生效。
+    - 独立诊断（4096 环境 x 48 步）:
+        zero_lin 指令占比 3.64%
+        zero_lin 且 |wz|<0.1 占比 0.38%
+        P(|wz|<0.1 | zero_lin) = 10.4%
+        门控命中 747 env-step，episode_sums 累计 -17.54
+      -> 门控不是形同虚设，样本量足够（训练 3000 轮约 3M 次命中）。
+    - 无 AttributeError、无 NaN
+    - 冒烟测试日志目录 Oct18_11-44-29_ / Oct18_11-49-02_ 已删除
+    - logs/go2_2（用户的真实训练）未受影响
+
+================================================================================
+第 4 步：第二轮完整训练（待用户执行）
+================================================================================
+  状态: 等待用户训练并反馈
+  建议命令（沿用上次的 experiment/run 名，deploy yaml 已指向 go2_2）:
+    export LD_LIBRARY_PATH=/home/ubuntu/miniconda3/envs/unitree-rl/lib:$LD_LIBRARY_PATH
+    export PATH=/home/ubuntu/miniconda3/envs/unitree-rl/bin:$PATH
+    cd /home/ubuntu/B4_2025/unitree_rl_gym
+    python legged_gym/scripts/train.py --task=go2 --headless \
+        --experiment_name=go2_2 --run_name=go2_2 --max_iterations=3000
+  训练后:
+    1) 用 play.py 导出 policy_1.pt 到 logs/go2_2/exported/policies/
+    2) deploy/deploy_mujoco/configs/go2.yaml 的 policy_path 已指向该文件
+  验收重点:
+    - rew_tracking_lin_vel 仍 >= 0.7
+    - mean_episode_length 仍接近 1002
+    - 0 指令时不再原地踏步；20 秒漂移继续下降
+
+  下一轮可选（若仍踏步）:
+    - zero_cmd_dof_vel 从 -5e-3 加到 -1e-2 ~ -2e-2
+    - 或再加 zero_cmd_action = -0.02
