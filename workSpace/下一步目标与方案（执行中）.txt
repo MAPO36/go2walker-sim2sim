@@ -345,5 +345,43 @@
       新 tracking 值、新漂移（Isaac/MuJoCo）、训练耗时、权重；
   - 更新 report.txt / 本文件的“结果”部分。
 
+****************************************************************************************
+1.改tracking_lin_vel = 0.8
+2.
+在 go2_env.py 的 GO2Robot 类里，加这个函数
+
+def _resample_commands(self, env_ids):
+        super()._resample_commands(env_ids)
+        if len(env_ids) == 0 or getattr(self.cfg.commands, "manual", False):
+            return
+
+        p = 0.3                      # 想多少比例就改这个数，0.3 = 30%
+        pick = torch.rand(len(env_ids), device=self.device) < p
+        zero_ids = env_ids[pick]
+        if len(zero_ids) == 0:
+            return
+
+        self.commands[zero_ids] = 0.0
+        # heading_command=True 时，wz 每步会按“目标朝向 - 当前朝向”重算。
+        # 只清 0 不够，必须把目标朝向设成当前朝向，wz 才会真的是 0。
+        if self.cfg.commands.heading_command:
+            forward = quat_apply(self.base_quat[zero_ids], self.forward_vec[zero_ids])
+            heading = torch.atan2(forward[:, 1], forward[:, 0])
+            self.commands[zero_ids, 3] = heading
+
+细节：
+    * p 建议 0.2 ~ 0.5。太大（>0.5）会让走路的样本变少，行走变差。
+    * 每次重采样时随机抽，所以长期比例就等于 p。
+    * 这个函数会被两处调用：episode 重置、每 10 秒重采样。都会生效。
+    * play.py 的键盘模式 manual=True，会直接跳过，不受影响。
+    
+    
+3.
+将def _reward_zero_cmd_dof_pos(self):（go2_env.py中的）
+改为平方 -> exp(k*误差²) - 1
+    err = torch.clamp(self.dof_pos - self.default_dof_pos, -0.5, 0.5)
+    return torch.sum(torch.expm1(torch.square(err)), dim=1) * is_zero_cmd
+
+    
 
 

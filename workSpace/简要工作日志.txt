@@ -97,3 +97,24 @@ policy为go2_3
 新训练效果仍不理想,已经改回0.2
 将zero_cmd_dof_vel = -5e-3零指令时惩罚关节转动
 改为惩罚0指令时偏离默认姿态的关节角度，新增“奖励函数快捷修改指南.txt”
+
+3.4
+
+1.改tracking_lin_vel = 0.8
+2.
+在 go2_env.py 的 GO2Robot 类里，加这个函数
+
+def _resample_commands(self, env_ids):
+       
+3.
+将def _reward_zero_cmd_dof_pos(self):（go2_env.py中的）
+改为平方 -> exp(k*误差²) - 1
+    err = torch.clamp(self.dof_pos - self.default_dof_pos, -0.5, 0.5)
+    return torch.sum(torch.expm1(torch.square(err)), dim=1) * is_zero_cmd
+效果不佳
+
+于是降低contact权重到0.07
+增大0指令跟随惩罚
+0指令权重改为0.35
+
+训练得go2_5.pt网络，解决原地踏步问题。出现新的问题，前进时步伐太散，增大contact再训练
