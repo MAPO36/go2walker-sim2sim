@@ -1,0 +1,236 @@
+奖励函数便捷修改指南（Go2）
+============================================================
+只记三个地方，就够了：
+
+  1) 权重大小（一个数字）        legged_gym/envs/go2/go2_config.py
+  2) 奖励公式（一段代码）        legged_gym/envs/go2/go2_env.py
+  3) 指令怎么随机（空指令比例）  legged_gym/envs/go2/go2_env.py 里的 _resample_commands
+
+通用规则在 legged_gym/envs/base/legged_robot.py，一般不要动。
+
+改完必须重新训练。旧模型不会自动变好。
+
+------------------------------------------------------------
+一、新增一个奖励函数
+------------------------------------------------------------
+两个地方，各加一行/一段，名字必须一模一样。
+
+第 1 步：在 go2_config.py 的 scales 里加权重（第 49~69 行）
+    zero_cmd_lin_vel = -2.0     <- 已有，照这个格式
+    stand_still      = -0.2     <- 新增，名字随便起，但不能和已有的重名
+
+    正数 = 鼓励，负数 = 惩罚，0 = 关闭（等于没写）。
+
+第 2 步：在 go2_env.py 的 GO2Robot 类里加函数
+    def _reward_stand_still(self):
+        # 返回形状必须是 (num_envs,)
+        return torch.sum(torch.square(self.dof_pos - self.default_dof_pos), dim=1)
+
+    函数名 = "_reward_" + 配置里的名字。
+    配置写 stand_still，函数就必须叫 _reward_stand_still。
+    少一个字母就报 AttributeError。
+
+第 3 步：跑 2 轮冒烟测试
+    cd /home/ubuntu/B4_2025/unitree_rl_gym
+    python legged_gym/scripts/train.py --task=go2 --headless --max_iterations=2
+
+第 4 步：删除这次冒烟测试的 logs 目录（play.py 会加载最新的目录，
+        不删会误加载没训练好的模型）。
+
+第 5 步：正式训练，看 TensorBoard 里的 rew_stand_still
+    它必须是非零的。一直是 0，说明名字对不上或权重是 0。
+
+能用的量（都在 self 里）：
+    self.commands        指令 [vx, vy, wz, heading]
+    self.base_lin_vel    机身线速度（base 系）
+    self.base_ang_vel    机身角速度
+    self.dof_pos         关节角
+    self.dof_vel         关节角速度
+    self.actions         当前动作
+    self.last_actions    上一步动作
+    self.contact_forces  接触力
+    self.feet_pos        脚的位置
+    self.leg_phase       四条腿的节拍相位
+    self.episode_length_buf  当前 episode 走了几步
+
+注意：
+    * 只能写 torch，不能写 numpy。
+    * 不要自己乘 dt。框架会自动乘 0.02。
+      配置 -2.0 的实际含义是 -2.0 * 0.02 = -0.04 / 步。
+    * only_positive_rewards=True：所有奖励加起来如果小于 0，会被砍成 0。
+      所以负奖励太多时，梯度会消失，狗学不到东西。加惩罚要一点点加。
+
+------------------------------------------------------------
+二、修改已有奖励的数值 / 表达式
+------------------------------------------------------------
+只改数值：
+    打开 go2_config.py，改等号右边那个数字，例如
+        zero_cmd_lin_vel = -2.0   ->   -3.0
+    只改这一行，其他什么都不用动。
+
+改表达式：
+    打开 go2_env.py，找到对应的 def _reward_xxx(self)，
+    改 return 那一行。配置里的权重不要动。
+
+怎么找：
+    grep -n "_reward_zero_cmd_lin_vel" legged_gym/envs/go2/go2_env.py
+    grep -n "zero_cmd_lin_vel" legged_gym/envs/go2/go2_config.py
+
+不建议改 base/legged_robot.py 里的通用奖励（tracking_lin_vel、
+dof_vel、action_rate 等），因为 g1 / h1 也在用。要改就在
+go2_env.py 里覆盖同名函数。
+
+改完照样：冒烟 2 轮 -> 删测试 logs -> 正式训练 -> 看 TensorBoard。
+
+------------------------------------------------------------
+三、增加训练时的“空指令比例”
+------------------------------------------------------------
+现在为什么空指令少：
+    指令在 [-1,1] 里均匀随机，线速度小于 0.2 就被清零。
+    纯随机撞上零线速度的概率只有约 3%。
+    再要求偏航也接近 0，比例更低（约 0.4%）。
+
+做法：在 go2_env.py 的 GO2Robot 类里，加这个函数（放在类里面，
+和 _reward_xxx 平级）：
+
+    def _resample_commands(self, env_ids):
+        super()._resample_commands(env_ids)
+        if len(env_ids) == 0 or getattr(self.cfg.commands, "manual", False):
+            return
+
+        p = 0.3                      # 想多少比例就改这个数，0.3 = 30%
+        pick = torch.rand(len(env_ids), device=self.device) < p
+        zero_ids = env_ids[pick]
+        if len(zero_ids) == 0:
+            return
+
+        self.commands[zero_ids] = 0.0
+        # heading_command=True 时，wz 每步会按“目标朝向 - 当前朝向”重算。
+        # 只清 0 不够，必须把目标朝向设成当前朝向，wz 才会真的是 0。
+        if self.cfg.commands.heading_command:
+            forward = quat_apply(self.base_quat[zero_ids], self.forward_vec[zero_ids])
+            heading = torch.atan2(forward[:, 1], forward[:, 0])
+            self.commands[zero_ids, 3] = heading
+
+细节：
+    * p 建议 0.2 ~ 0.5。太大（>0.5）会让走路的样本变少，行走变差。
+    * 每次重采样时随机抽，所以长期比例就等于 p。
+    * 这个函数会被两处调用：episode 重置、每 10 秒重采样。都会生效。
+    * play.py 的键盘模式 manual=True，会直接跳过，不受影响。
+
+怎么验证比例对不对：
+    训练开头临时加一行打印，跑 2 轮后删掉：
+        print("zero ratio", (torch.norm(self.commands[:, :2], dim=1) < 0.2).float().mean().item())
+    看到接近你设的 p 就对了。
+
+------------------------------------------------------------
+四、放宽 / 收紧“节拍器的门控”
+------------------------------------------------------------
+先分清两个东西，别改错：
+
+A) 零指令门控（把节拍器奖励关掉的开关）——最常说的“门控”
+   位置：go2_env.py 第 112~120 行 _zero_cmd_mask()
+
+       return (
+           (torch.norm(self.commands[:, :2], dim=1) < 0.2)
+           & (torch.abs(self.commands[:, 2]) < 0.1)
+       ).float()
+
+   门槛 0.2（线速度）和 0.1（偏航）。
+   放宽 = 把数字调大（0.3 / 0.15）→ 更多情况算“零指令”→ 门关得更频繁。
+   收紧 = 把数字调小（0.1 / 0.05）→ 只有更接近 0 才算零指令。
+
+   必须同步改的地方（否则行为不一致）：
+       1. go2_env.py  _zero_cmd_mask()                 0.2 和 0.1
+       2. go2_env.py  _reward_zero_cmd_lin_vel()       0.2
+       3. go2_env.py  _reward_zero_cmd_dof_pos()       0.2 和 0.1
+       4. legged_robot.py _resample_commands() 里的清零阈值 0.2
+          （这只是“小指令清零”，和门控不是一回事，但最好保持一致）
+
+   一条命令全找出来：
+       grep -rn "0\.2\|0\.1" legged_gym/envs/go2/go2_env.py
+
+B) 相位门控（节拍器本身：什么时候算支撑相）
+   位置：go2_env.py 第 125 行
+
+       is_stance = self.leg_phase[:, i] < 0.55
+
+   0.55 = 一个周期里 55% 的时间算“踩地”，45% 算“抬腿”。
+   调大 = 支撑相更长、抬腿更短（步子更碎）。
+   调小 = 支撑相更短、抬腿更长（步幅更大、更容易摔）。
+   建议范围 0.5 ~ 0.7，不要超过 0.8。
+
+   同一段里还有三个数，改之前想清楚：
+       period = 0.8   一步周期的秒数
+       offset = 0.5   对角腿错开半个周期 = trot
+       0.55           支撑相占比
+
+   重要：period 必须和 deploy/deploy_mujoco/deploy_mujoco.py 里
+   写死的 0.8 一致，否则训练和部署的节拍对不上，策略会乱。
+   offset 改成别的值就不是 trot 步态了，observation 的相位含义也变了。
+
+------------------------------------------------------------
+五、把“0 指令偏离”惩罚从平方改成指数
+------------------------------------------------------------
+先说“偏离”是哪个奖励：
+    就是 zero_cmd_dof_pos（0 指令时惩罚关节偏离默认姿态）。
+    现在的公式是平方：
+
+        return torch.sum(torch.square(self.dof_pos - self.default_dof_pos), dim=1) * is_zero_cmd
+
+把它改成指数，只动这一个 return，门控和权重位置都不用改。
+
+方案 A（安全，先试这个）：平方 -> exp(k*误差²) - 1
+    err = torch.clamp(self.dof_pos - self.default_dof_pos, -0.5, 0.5)
+    return torch.sum(torch.expm1(torch.square(err)), dim=1) * is_zero_cmd
+
+    特点：误差很小时和平方几乎一样，误差大时才快速变大。
+    权重可以继续用 -1.0，基本不用重调。
+
+方案 B（小偏差也罚得更狠）：平方 -> exp(k*|误差|) - 1
+    err = torch.clamp(torch.abs(self.dof_pos - self.default_dof_pos), max=0.3)
+    return torch.sum(torch.expm1(2.0 * err), dim=1) * is_zero_cmd
+
+    特点：误差 = 0 时梯度也不为 0，能把最后一点点偏移压住。
+    但指数比平方强很多，权重必须大幅调小：
+        zero_cmd_dof_pos: -1.0  ->  -0.05 起步（范围 -0.02 ~ -0.2）
+
+三个必须注意的点：
+    1. 一定要 clamp。不截断的话，一个关节偏差 1 rad，
+       exp(2)≈7.4，12 个关节加起来会把奖励炸掉。
+    2. expm1(x) 就是 exp(x)-1，x 很小时数值更准，直接用 expm1。
+    3. 换公式后先冒烟 2 轮，看 TensorBoard 的 rew_zero_cmd_dof_pos：
+       每秒 -0.01 ~ -0.1 是正常量级；比 -1 还大就是权重太狠。
+
+如果你说的“原位置”是机身位置，不是关节角：
+    误差项换成
+        err = torch.norm(self.base_pos[:, :2] - self.start_pos[:, :2], dim=1)
+    其中 start_pos 要在每次 episode 重置时记录当前位置，其余公式完全一样。
+    当前代码里没有 start_pos，用关节角版本最省事。
+
+------------------------------------------------------------
+六、每次改完的固定流程（照抄）
+------------------------------------------------------------
+1. 备份要改的文件。
+2. 冒烟测试 2 轮（命令见第一部分第 3 步）。
+3. 删除这次冒烟测试生成的 logs/<新目录>。
+4. 正式训练：
+       python legged_gym/scripts/train.py --task=go2 --headless
+5. TensorBoard 看曲线：
+       tensorboard --logdir logs
+   重点看：新奖励的 rew_xxx 非零、rew_tracking_lin_vel 没掉、
+   episode 长度没明显变短。
+6. Isaac Gym 里用 play.py 看效果，再导出 policy。
+7. MuJoCo 里用 deploy_mujoco.py 复测。
+8. 旧 checkpoint 不会因为改了奖励就变好，必须用新训练的模型。
+
+------------------------------------------------------------
+七、最常见的 6 个坑
+------------------------------------------------------------
+1. 配置里写了名字，环境里没写函数 → AttributeError: 'GO2Robot' object has no attribute '_reward_xxx'
+2. 函数名和配置名差一个字母 → 同上，或奖励恒为 0。
+3. 权重写成 0 → 框架直接把这项删掉，函数根本不会被调用。
+4. 返回了 (N,1) 或标量 → 奖励广播错误。必须 return 形状 (num_envs,)。
+5. 用了 numpy 或普通 Python 循环 → 报错或极慢。只用 torch。
+6. 只改训练、不改部署 → MuJoCo 里动作全错。奖励不影响部署，
+   但如果你改了 period、观测维度、action_scale、PD 增益，部署配置必须一起改。

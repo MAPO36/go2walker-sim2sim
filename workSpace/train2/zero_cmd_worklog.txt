@@ -108,3 +108,63 @@
   下一轮可选（若仍踏步）:
     - zero_cmd_dof_vel 从 -5e-3 加到 -1e-2 ~ -2e-2
     - 或再加 zero_cmd_action = -0.02
+
+================================================================================
+第 4.1 步：第三轮（根因修复：门控步态奖励，2026-10-18 12:2x）
+================================================================================
+  用户反馈: 还是原地会有踏步。
+  日志核查: logs/go2_2 下仍只有 Oct18_11-11-05_go2_2，
+            未检测到第二轮完整训练的新 run。
+
+  网上调研结论（legged_gym / unitree_rl_gym / dropbear-locomotion）:
+    - 零指令踏步的标准解法是"把与指令无关的步态奖励在零指令时关掉"，
+      再配合显式的 standing penalty；只加关节速度惩罚往往不够。
+
+  本项目根因:
+    _reward_contact (权重 0.18) 按固定相位钟 leg_phase 奖励 trot 触地，
+    与指令无关。零指令下原地 trot 每步最多 +0.0144（0.18 x 4 x dt），
+    比站定时 alive 的 +0.003 高一个量级；_reward_feet_swing_height (-20)
+    又把摆动腿塑造成 0.08 m 抬腿。二者共同造成原地踏步。
+
+  改动（仍然只改奖励）:
+    文件: legged_gym/envs/go2/go2_env.py
+      新增 _zero_cmd_mask():
+        (norm(commands[:, :2]) < 0.2) & (|commands[:, 2]| < 0.1)
+      _reward_contact():            res * (1 - zero_cmd_mask)
+      _reward_feet_swing_height():  sum(pos_error) * (1 - zero_cmd_mask)
+    只影响完全零指令样本；正常行走、原地转向（|wz|>=0.1）行为不变。
+
+  冒烟测试（2 轮）:
+    - 无 AttributeError、无 NaN
+    - Episode/rew_contact 正常，Episode/rew_zero_cmd_lin_vel = -0.0017
+    - 冒烟目录 logs/rough_go2/Oct18_12-24-00_ 已删除
+
+  门控诊断（4096 env x 48 步随机动作）:
+    - 完全零指令占比 0.38%
+    - contact 原始总和 411241，门控后 409637
+    - 零指令环境上泄漏 0（gated reward 全部为 0）
+    - 每步 contact 奖励贡献 0.00753 -> 0.00750（仅零指令样本被移除）
+
+================================================================================
+第 4 步：第三轮完整训练（待用户执行）
+================================================================================
+  状态: 等待用户训练并反馈
+  命令:
+    export LD_LIBRARY_PATH=/home/ubuntu/miniconda3/envs/unitree-rl/lib:$LD_LIBRARY_PATH
+    export PATH=/home/ubuntu/miniconda3/envs/unitree-rl/bin:$PATH
+    cd /home/ubuntu/B4_2025/unitree_rl_gym
+    python legged_gym/scripts/train.py --task=go2 --headless \
+        --experiment_name=go2_2 --run_name=go2_2 --max_iterations=3000
+  训练后:
+    1) 用 play.py 导出 policy_1.pt 到 logs/go2_2/exported/policies/
+    2) deploy/deploy_mujoco/configs/go2.yaml 的 policy_path 已指向该文件
+  验收重点:
+    - rew_tracking_lin_vel 仍 >= 0.7
+    - mean_episode_length 仍接近 1002
+    - 0 指令时不再原地踏步；20 秒漂移继续下降
+
+  若第三轮仍踏步，下一轮按顺序尝试:
+    a) zero_cmd_dof_vel 加到 -1e-2 ~ -2e-2
+    b) 加 zero_cmd_action = -0.02
+    c) 加零指令 stand_still（dof_pos 偏离默认，同门控，-0.2 起）
+    d) 方案 D：提高零指令采样比例（完全零指令仅 0.38%）

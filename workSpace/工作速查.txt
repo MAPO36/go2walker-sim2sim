@@ -1,0 +1,185 @@
+默认保存训练结果：
+logs/<experiment_name>/<date_time>_<run_name>/model_<iteration>.pt
+
+
+Play 会导出 Actor 网络，保存于 logs/{experiment_name}/exported/policies 中
+
+
+
+──   ───────────────┬───────┐
+  │      功能       │  键   │
+  ├─────────────────┼───────┤
+  │ 前进 / 后退     │ ↑ / ↓ │
+  ├─────────────────┼───────┤
+  │ 左平移 / 右平移 │ ← / → │
+  ├─────────────────┼───────┤
+  │ 原地左转 / 右转 │ K / L │
+  └─────────────────┴───────┘
+  
+  
+  目录地图
+--------------------------------------------------------------------------------
+  legged_gym/                     训练环境（“世界”和“规则”）
+    envs/
+      base/
+        base_config.py            最底层的配置基类（空壳）
+        legged_robot_config.py    通用四足/人形配置 + PPO 超参数
+        legged_robot.py           通用机器人环境：观测、奖励、PD、reset、终止
+        base_task.py              Isaac Gym 的初始化、缓冲、窗口、键盘事件
+      go2/
+        go2_config.py             Go2 的参数（关节角、增益、奖励权重）
+        go2_env.py                Go2 的子类（足端状态、步态相位、5 个奖励）
+      g1/ h1/ h1_2/               其他机型的配置和子类
+      __init__.py                 把 go2/h1/h1_2/g1 注册进 task_registry
+    scripts/
+      train.py                    训练入口
+      play.py                     回放 + 导出网络入口
+    utils/
+      task_registry.py            任务注册表：名字 -> (环境类, 环境配置, 训练配置)
+      helpers.py                  配置字典化、随机种子、导出 TorchScript、找模型路径
+      math.py                     四元数、欧拉角等数学工具
+  rsl_rl/                         PPO 算法库（独立于 legged_gym）
+    algorithms/ppo.py             PPO 的损失、更新、自适应学习率
+    modules/actor_critic.py       Actor/Critic 网络和高斯策略
+    runners/on_policy_runner.py   训练循环：采样、更新、日志、保存
+    storage/rollout_storage.py     rollout 缓存、GAE、mini-batch
+  resources/robots/go2/           Go2 的 URDF、MuJoCo XML、网格
+  deploy/
+    deploy_mujoco/                Sim2Sim：MuJoCo 里重建观测和 PD
+    deploy_real/                  Sim2Real：DDS 和真机通信
+  logs/                           训练产物：模型、TensorBoard、导出的 .pt
+
+
+
+A. 术语表
+--------------------------------------------------------------------------------
+  MDP            马尔可夫决策过程：状态、动作、奖励、转移、折扣。
+  obs            观测，策略的输入。
+  action         动作，策略的输出。
+  reward         奖励，训练时的分数。
+  episode        一个回合，从 reset 到终止/超时。
+  rollout        采样阶段，用当前策略收集经验。
+  PPO            近端策略优化，一种 on-policy 策略梯度算法。
+  GAE            广义优势估计，用多步回报估计优势。
+  actor          策略网络，输出动作。
+  critic         价值网络，输出状态价值。
+  privileged obs 只给 critic 的额外观测（这里是机身线速度）。
+  domain rand.   域随机化：随机化摩擦、质量、推力等，提高鲁棒性。
+  sim2sim        仿真到仿真迁移（Isaac Gym -> MuJoCo）。
+  sim2real       仿真到真机迁移。
+  decimation     每个控制步包含多少个物理步。
+  PD control     比例-微分控制：tau = Kp*误差 - Kd*速度。
+  TorchScript    PyTorch 的序列化模型格式，可脱离训练代码运行。
+  trot           对角小跑：对角腿同相。
+  heading        目标航向角。
+  zero command   速度指令为 0 的状态。
+
+B. 命令速查
+--------------------------------------------------------------------------------
+  训练（完整）：
+      cd /home/ubuntu/B4_2025/unitree_rl_gym
+      python legged_gym/scripts/train.py --task=go2 --headless
+
+  冒烟测试（2 轮）：
+      python legged_gym/scripts/train.py --task=go2 --headless --max_iterations=2
+      # 跑完删掉新生成的 logs/rough_go2/<时间目录>
+
+  导出 + 回放：
+      python legged_gym/scripts/play.py --task=go2
+      # 默认 manual=True，按 W/S/A/D/Q/E 控制
+      # RUN_MANUAL=0 关闭键盘，用随机指令
+
+  MuJoCo（GUI，键盘）：
+      python deploy/deploy_mujoco/deploy_mujoco.py go2.yaml
+      # 方向键上下左右 + K/L
+
+  MuJoCo（headless，测数字）：
+      python deploy/deploy_mujoco/deploy_mujoco.py go2.yaml --headless --duration 20
+
+  TensorBoard：
+      tensorboard --logdir logs/rough_go2
+
+  查看模型：
+      ls -l logs/rough_go2/exported/policies/
+
+C. 文件地图（本项目的关键文件）
+--------------------------------------------------------------------------------
+  legged_gym/envs/__init__.py                 任务注册
+  legged_gym/envs/base/base_task.py           Isaac Gym 初始化、窗口、键盘
+  legged_gym/envs/base/legged_robot.py        观测、奖励、PD、reset、终止
+  legged_gym/envs/base/legged_robot_config.py 通用配置 + PPO 超参数
+  legged_gym/envs/go2/go2_config.py           Go2 参数和奖励权重
+  legged_gym/envs/go2/go2_env.py              Go2 子类：足端、相位、5 个奖励
+  legged_gym/scripts/train.py                 训练入口
+  legged_gym/scripts/play.py                  回放 + 导出
+  legged_gym/utils/task_registry.py           注册表
+  legged_gym/utils/helpers.py                 配置字典化、找模型、导出
+  rsl_rl/rsl_rl/algorithms/ppo.py             PPO
+  rsl_rl/rsl_rl/modules/actor_critic.py       网络
+  rsl_rl/rsl_rl/runners/on_policy_runner.py   训练循环
+  rsl_rl/rsl_rl/storage/rollout_storage.py    rollout + GAE
+  deploy/deploy_mujoco/deploy_mujoco.py       Sim2Sim + 键盘
+  deploy/deploy_mujoco/configs/go2.yaml       Sim2Sim 配置
+  deploy/deploy_real/deploy_real.py           Sim2Real
+  resources/robots/go2/urdf/go2.urdf          训练用 URDF
+  resources/robots/go2/go2.xml                MuJoCo 模型
+  resources/robots/go2/scene.xml              MuJoCo 场景
+
+D. 观测/动作/奖励契约（打印版）
+--------------------------------------------------------------------------------
+  观测（47）：
+      0:3    ang_vel      ×0.25      噪声 0.05
+      3:6    gravity      ×1         噪声 0.05
+      6:9    cmd          ×[2,2,0.25] 噪声 0
+      9:21   dof_pos      ×1         噪声 0.01
+      21:33  dof_vel      ×0.05      噪声 0.075
+      33:45  last_action  ×1         噪声 0
+      45:47  sin/cos      ×1         噪声 0
+
+  动作（12）：
+      target_q = action × 0.25 + default_angles
+      tau = 20 × (target_q - q) - 0.5 × dq
+      tau 夹到 URDF effort 上限
+
+  指令（4）：
+      [vx, vy, wz, heading]
+      vx, vy ~ U(-1,1)，长度 <0.2 清零
+      heading ~ U(-π,π)
+      wz = clip(0.5 × wrap_to_pi(heading - current), -1, 1)（heading_command=True）
+
+  奖励权重（16 项生效）：
+      tracking_lin_vel  +1.0
+      tracking_ang_vel  +0.5
+      lin_vel_z         -2.0
+      ang_vel_xy        -0.05
+      orientation       -1.0
+      base_height       -10.0
+      dof_acc           -2.5e-7
+      dof_vel           -1e-3
+      action_rate       -0.01
+      dof_pos_limits    -5.0
+      alive             +0.15
+      hip_pos           -1.0
+      contact_no_vel    -0.2
+      feet_swing_height -20.0
+      contact           +0.18
+      torques           -0.0002
+      （feet_air_time=0、collision=0、termination=0，关闭）
+
+  训练超参数：
+      num_envs 4096, episode 20 s, dt 0.02 s
+      num_steps_per_env 24, max_iterations 1500
+      gamma 0.99, lam 0.95, clip 0.2
+      epochs 5, minibatches 4, lr 1e-3 adaptive, desired_kl 0.01
+      entropy 0.01, value_loss_coef 1.0, max_grad_norm 1.0
+      actor 47-512-256-128-12, critic 50-512-256-128-1
+
+--------------------------------------------------------------------------------------------
+踏步：
+
+go2-2 加了速度惩罚 效果不大
+go2-3 加了动作惩罚 效果不大
+go2-4 节拍器门控
+
+============================================================================================================================================================================================
+
