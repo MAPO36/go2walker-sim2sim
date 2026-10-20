@@ -100,13 +100,13 @@ policy为go2_3
 
 3.4
 
-1.改tracking_lin_vel = 0.8
-2.
+<1.改tracking_lin_vel = 0.8
+<2.
 在 go2_env.py 的 GO2Robot 类里，加这个函数
 
 def _resample_commands(self, env_ids):
        
-3.
+<3.
 将def _reward_zero_cmd_dof_pos(self):（go2_env.py中的）
 改为平方 -> exp(k*误差²) - 1
     err = torch.clamp(self.dof_pos - self.default_dof_pos, -0.5, 0.5)
@@ -117,4 +117,10 @@ def _resample_commands(self, env_ids):
 增大0指令跟随惩罚
 0指令权重改为0.35
 
-训练得go2_5.pt网络，解决原地踏步问题。出现新的问题，前进时步伐太散，增大contact再训练
+训练得go2_5.pt网络，解决原地踏步问题。出现新的问题，前进时步伐太散，增大contact再训练（进行中）
+
+:::::(进行中)
+
+0指令权重改为0.3
+contact权重到0.08
+训练4096*1500,policy为go2_6
