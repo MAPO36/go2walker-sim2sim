@@ -119,8 +119,34 @@ def _resample_commands(self, env_ids):
 
 训练得go2_5.pt网络，解决原地踏步问题。出现新的问题，前进时步伐太散，增大contact再训练（进行中）
 
-:::::(进行中)
+3.5
 
 0指令权重改为0.3
 contact权重到0.08
 训练4096*1500,policy为go2_6
+
+
+4.0
+
+contact -> 0.09
+4096*10000 -> go2_7
+（不行）
+	(如果有：
+	2. zero_cmd_dof_pos 从指数改回平方：最小改动
+
+  	当前代码（go2_env.py:196-197 附近）：
+
+  	err = torch.clamp(self.dof_pos - self.default_dof_pos, -0.5, 0.5)
+ 	 return torch.sum(torch.expm1(torch.square(err)), dim=1) * is_zero_cmd
+
+  	只改 return 这一行，把 expm1(...) 去掉：
+
+  	return torch.sum(torch.square(err), dim=1) * is_zero_cmd
+
+ 	 err 和 clamp 都保留，门控不动。
+	)
+确定：contact -》 0.07
+
+4096* 1500轮 -》 go2_7
+zero_cmd_dof_pos = -1.9
+4096* 1500 -> go2_8  目前verygood，但是可能会在某个位姿卡死
