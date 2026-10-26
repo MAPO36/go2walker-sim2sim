@@ -1,0 +1,11 @@
+# 训练日志（体积大，不入库）
+logs/
+unitree_rl_gym/logs/
+
+# Python 运行产物
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 本地运行日志
+MUJOCO_LOG.TXT
